@@ -1,0 +1,24 @@
+# Python / virtualenv
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# Streamlit
+.streamlit/
+
+# Hugging Face / Transformers cache
+.hf_cache/
+.cache/
+huggingface/
+transformers_cache/
+*.lock
+
+# Chroma / vector db persistence
+chroma_db/
+chroma/
+*.sqlite3
+
+# OS / editor
+.DS_Store
+.vscode/
