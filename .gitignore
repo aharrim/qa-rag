@@ -16,6 +16,7 @@ transformers_cache/
 
 # Chroma / vector db persistence
 chroma_db/
+chroma_db_st/
 chroma/
 *.sqlite3
 
