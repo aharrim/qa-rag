@@ -6,7 +6,9 @@ from .analytics import bugs_to_df, analytics_reports
 from .chroma_store import build_chroma_collection
 from .llm import build_llm_context, ollama_generate
 from .grounding import retrieval_is_weak, validate_llm_answer, format_safe_refusal
-from .router import rule_route, analytics_dispatch
+from .router import rule_route, analytics_dispatch, lookup_dispatch
+
+
 
 
 def build_state_from_csv_or_memory(
@@ -48,7 +50,11 @@ def answer_question(state: ProjectState, user_question: str, top_k: int = 3, max
         route = "RAG"
 
     print(f"\n[Router] Route = {route}\n")
-
+    
+    if route == "LOOKUP":
+        lookup_dispatch(user_question=user_question, df=state.df)
+        return
+    
     if route == "ANALYTICS":
         analytics_dispatch(
             user_question=user_question,
@@ -59,6 +65,7 @@ def answer_question(state: ProjectState, user_question: str, top_k: int = 3, max
             open_critical_by_component=state.open_critical_by_component,
         )
         return
+
 
     # --- RAG route ---
     rag_query = user_question
