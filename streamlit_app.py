@@ -301,30 +301,20 @@ if SRC_PATH not in sys.path:
     sys.path.insert(0, SRC_PATH)
 
 from qa_rag.app import build_state_from_csv_or_memory, answer_question
-from qa_rag.analytics import (
-    bugs_to_df,
-    analytics_reports,
-    apply_filters,
-    bugs_count_by_component,
-    bugs_count_by_severity,
-    resolution_time_by_component,
-    bugs_list_view,
-)
+from qa_rag.analytics import bugs_to_df, analytics_reports
+
 
 # -------------------------
-# Demo questions (product-style)
+# Demo questions (product-style) — keep only 5 (less crowded)
 # -------------------------
 DEMO_QUESTIONS = {
     "Release readiness": "Give me a release readiness summary: total open bugs, total critical (P0) open bugs, and top risky components.",
     "Open bugs by component": "How many open bugs by component?",
     "Critical bugs (P0)": "What are the critical bugs for all bugs?",
-    "Bug lookup (example)": "Show details for BUG-1005.",
-    "Closed bugs for component": "What are the closed bugs for component Payments?",
-    "Closed bugs by component": "How many closed bugs by component?",
     "Avg resolution time by component": "What is the average resolution time (days) by component for closed bugs?",
-    "Resolution time for bug": "What is the resolution time for BUG-1005?",
-    "Known issue (Apple Pay pending)": "Is there a known bug where Apple Pay succeeds but order stays pending?",
+    "Known issue: Apple Pay pending": "Is there a known bug where Apple Pay succeeds but order stays pending?",
 }
+
 
 # -------------------------
 # Helpers
@@ -370,7 +360,6 @@ def parse_output(out: str):
     for ln in lines:
         s = ln.strip()
 
-        # Section toggles
         if s.startswith("=== Final Answer"):
             in_final = True
             in_matches = False
@@ -380,14 +369,12 @@ def parse_output(out: str):
             in_final = False
             continue
 
-        # If another section header starts, stop current section
         if s.startswith("===") and not s.startswith("=== Final Answer") and not s.startswith("=== RAG Top Matches"):
             in_final = False
             in_matches = False
             other_lines.append(ln)
             continue
 
-        # Route line: don't duplicate in other blocks
         if route_line and ln.strip() == route_line.strip():
             continue
 
@@ -428,20 +415,67 @@ def show_preserved_block(text: str):
 
 
 # -------------------------
+# Local analytics helpers (keep existing functionality; no extra analytics.py deps)
+# -------------------------
+def count_by_component(df: pd.DataFrame, count_col_name: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["component", count_col_name])
+    return (
+        df.groupby("component")["id"]
+        .count()
+        .sort_values(ascending=False)
+        .rename(count_col_name)
+        .reset_index()
+    )
+
+
+def count_by_severity(df: pd.DataFrame, count_col_name: str) -> pd.DataFrame:
+    if df.empty:
+        return pd.DataFrame(columns=["severity", count_col_name])
+    sev = df["severity"].fillna("").astype(str).str.strip()
+    tmp = df.copy()
+    tmp["severity"] = sev.replace("", "unknown")
+    return (
+        tmp.groupby("severity")["id"]
+        .count()
+        .sort_values(ascending=False)
+        .rename(count_col_name)
+        .reset_index()
+    )
+
+
+def apply_filters(df: pd.DataFrame, status: str | None = None, component: str | None = None) -> pd.DataFrame:
+    out = df
+    if status == "open":
+        out = out[out["is_open"]]
+    elif status == "closed":
+        out = out[~out["is_open"]]
+    if component:
+        out = out[out["component"].fillna("").astype(str).str.strip() == component]
+    return out
+
+
+def bugs_list_view(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in ["id", "component", "severity", "created_date", "closed_date", "title"] if c in df.columns]
+    if not cols:
+        return df
+    return df[cols].sort_values(by="created_date", ascending=False, na_position="last")
+
+
+# -------------------------
 # Analytics cache
 # -------------------------
 @st.cache_data(show_spinner=False)
 def compute_analytics_tables(bugs_list: list[dict]) -> dict:
     df = bugs_to_df(bugs_list)
 
-    # Backward-compatible reports you already had
+    # Your existing reports
     open_by_component, resolution_by_component, open_critical, open_critical_by_component = analytics_reports(df)
 
-    # New: closed counts too (generic)
-    closed_by_component = bugs_count_by_component(df[~df["is_open"]], count_col_name="closed_bugs")
-
-    open_by_severity = bugs_count_by_severity(df[df["is_open"]], count_col_name="open_bugs")
-    closed_by_severity = bugs_count_by_severity(df[~df["is_open"]], count_col_name="closed_bugs")
+    # Add closed/open by severity and closed by component (computed here)
+    closed_by_component = count_by_component(df[~df["is_open"]], "closed_bugs")
+    open_by_severity = count_by_severity(df[df["is_open"]], "open_bugs")
+    closed_by_severity = count_by_severity(df[~df["is_open"]], "closed_bugs")
 
     return {
         "df": df,
@@ -456,7 +490,7 @@ def compute_analytics_tables(bugs_list: list[dict]) -> dict:
 
 
 # -------------------------
-# Question -> status/component inference (generic)
+# Question inference
 # -------------------------
 CLOSED_WORDS = ["closed", "resolved", "fixed", "done", "completed"]
 OPEN_WORDS = ["open", "pending", "active"]
@@ -472,10 +506,6 @@ def infer_status(q: str) -> str | None:
 
 
 def infer_component(q: str, df: pd.DataFrame) -> str | None:
-    """
-    Try to infer component mentioned in text by matching against existing component values (case-insensitive).
-    This makes it work for ANY component without hardcoding "payments".
-    """
     if df is None or df.empty or "component" not in df.columns:
         return None
 
@@ -489,16 +519,12 @@ def infer_component(q: str, df: pd.DataFrame) -> str | None:
         .tolist()
     )
 
-    # Match longest names first to avoid partial collisions
     comps_sorted = sorted([c for c in components if c.strip()], key=lambda x: len(x), reverse=True)
-
     for comp in comps_sorted:
         if comp.lower() in ql:
             return comp
 
-    # Also handle pattern: "component Payments" even if not exact casing
     if "component" in ql:
-        # take word after 'component'
         tokens = ql.split()
         for i, t in enumerate(tokens):
             if t == "component" and i + 1 < len(tokens):
@@ -520,29 +546,23 @@ def render_inline_chart_and_table(q: str, tables: dict):
     status = infer_status(q)
     component = infer_component(q, df_all)
 
-    # If user asked explicitly for closed/open bugs for a component,
-    # show a filtered bug list + chart by severity (most useful)
+    # Component-specific list query
     if component and status in ("open", "closed") and ("bug" in ql or "bugs" in ql):
         filtered = apply_filters(df_all, status=status, component=component)
-        title = f"{status.title()} bugs for component {component}"
+        title = f"{status.title()} bugs for {component}"
 
         st.markdown(f"### {title}")
-        st.write(f"Count: {len(filtered)}")
-
-        # List view
+        st.caption(f"Count: {len(filtered)}")
         st.dataframe(bugs_list_view(filtered), use_container_width=True)
 
-        # Severity breakdown chart (for that component)
-        sev_tbl = bugs_count_by_severity(filtered, count_col_name="bugs")
-        if not sev_tbl.empty and "severity" in sev_tbl.columns and "bugs" in sev_tbl.columns:
+        sev_tbl = count_by_severity(filtered, "bugs")
+        if not sev_tbl.empty:
             st.markdown("#### Breakdown by severity")
             st.dataframe(sev_tbl, use_container_width=True)
             st.bar_chart(sev_tbl.set_index("severity")[["bugs"]])
         return
 
-    # Otherwise choose global analytics view depending on question intent
-
-    # Severity view
+    # Global analytics selection
     if "severity" in ql:
         if status == "closed":
             df_show = tables["closed_by_severity"]
@@ -553,11 +573,11 @@ def render_inline_chart_and_table(q: str, tables: dict):
             title = "Open bugs by severity"
             index_col, value_col = "severity", "open_bugs"
 
-    # Resolution view
     elif "resolution" in ql or "avg" in ql or "average" in ql or "median" in ql or "p75" in ql or "p90" in ql:
         df_show = tables["resolution_by_component"]
         title = "Resolution time by component"
         index_col = "component"
+
         if "avg_days" in df_show.columns and ("avg" in ql or "average" in ql):
             value_col = "avg_days"
         elif "median_days" in df_show.columns and "median" in ql:
@@ -569,14 +589,12 @@ def render_inline_chart_and_table(q: str, tables: dict):
         else:
             value_col = "median_days" if "median_days" in df_show.columns else df_show.columns[-1]
 
-    # Critical view (open only by definition here)
     elif "critical" in ql or "p0" in ql or "blocker" in ql or "sev0" in ql:
         df_show = tables["open_critical_by_component"]
         title = "Open critical bugs by component"
         index_col = "component"
         value_col = "open_critical_bugs" if "open_critical_bugs" in df_show.columns else df_show.columns[-1]
 
-    # Component counts view (open or closed)
     else:
         if status == "closed":
             df_show = tables["closed_by_component"]
@@ -588,47 +606,30 @@ def render_inline_chart_and_table(q: str, tables: dict):
             index_col, value_col = "component", "open_bugs"
 
     st.markdown(f"### {title}")
+    st.dataframe(df_show, use_container_width=True)
 
-    if isinstance(df_show, pd.DataFrame):
-        st.dataframe(df_show, use_container_width=True)
-
-        # Render chart only when it makes sense
-        if (
-            not df_show.empty
-            and index_col in df_show.columns
-            and value_col in df_show.columns
-        ):
-            st.bar_chart(df_show.set_index(index_col)[[value_col]])
-    else:
-        st.caption("No structured metrics available.")
+    if not df_show.empty and index_col in df_show.columns and value_col in df_show.columns:
+        st.bar_chart(df_show.set_index(index_col)[[value_col]])
 
 
 # -------------------------
 # UI
 # -------------------------
-st.set_page_config(page_title="QA-RAG", layout="wide")
+st.set_page_config(page_title="Bug Intelligence", layout="wide")
 
-# Header bar
-h1, h2 = st.columns([3, 2])
-with h1:
-    st.title("QA-RAG")
-    st.caption("Bug Intelligence — grounded answers + retrieval context")
-with h2:
-    st.empty()
-
-# Sidebar
-st.sidebar.header("Quick demos")
-st.sidebar.caption("Pick a scenario to auto-fill the question.")
+# Sidebar: Example questions (less crowded)
+st.sidebar.header("Example questions")
+st.sidebar.caption("Click to auto-fill the question.")
 for label, q in DEMO_QUESTIONS.items():
     st.sidebar.button(label, on_click=set_question, args=(q,), use_container_width=True)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("You can also type your own question.")
 
 # -------------------------
 # Load state
 # -------------------------
 csv_path = os.path.join(PROJECT_ROOT, "bugs_sample_20.csv")
+
 
 @st.cache_resource
 def load_state():
@@ -638,14 +639,32 @@ def load_state():
         collection_name="bugs",
     )
 
+
 state = load_state()
+
+# Sidebar: Demo dataset (download)
+st.sidebar.markdown("### Demo dataset")
+with open(csv_path, "rb") as f:
+    st.sidebar.download_button(
+        label="Download demo CSV",
+        data=f.read(),
+        file_name="bugs_sample_20.csv",
+        mime="text/csv",
+        use_container_width=True,
+    )
+
+# Header (product name, not “QA-RAG”)
+st.title("Bug Intelligence")
+st.caption("AI assistant for QA metrics and known issues")
+
+
 
 # Minimal info row
 info1, info2, info3 = st.columns([1, 2, 2])
 with info1:
     st.metric("Bugs loaded", len(state.bugs))
 with info2:
-    st.caption(f"Dataset: `{os.path.basename(csv_path)}`")
+    st.caption("Dataset: demo")
 with info3:
     st.caption(f"Model: `{getattr(state, 'MODEL', 'unknown')}`")
 
@@ -657,9 +676,9 @@ if "question" not in st.session_state:
 
 row = st.columns([6, 1, 1])
 with row[0]:
-    st.text_input("Ask a question", key="question", placeholder="e.g., How many closed bugs by component?")
+    st.text_input("Ask a question", key="question", placeholder="e.g., How many open bugs by component?")
 with row[1]:
-    run = st.button("Run", type="primary", use_container_width=True)
+    run = st.button("Ask", type="primary", use_container_width=True)
 with row[2]:
     clear = st.button("Clear", use_container_width=True)
 
@@ -677,7 +696,7 @@ if run:
         err = None
 
         try:
-            with st.spinner("Running..."):
+            with st.spinner("Working..."):
                 with redirect_stdout(buf):
                     answer_question(state, q_norm)
         except Exception as e:
@@ -692,7 +711,6 @@ if run:
 
         st.subheader("Result")
 
-        # Main: Final Answer (grounded answer)
         with st.container(border=True):
             # User-friendly label (no “RAG/Analytics” jargon)
             if route_line:
@@ -710,22 +728,21 @@ if run:
             else:
                 show_preserved_block(out if out else "")
 
-        # If analytics route, render table + chart inline (dynamic per question)
+        # If analytics route, render table + chart inline
         is_analytics = bool(route_line) and ("ANALYTICS" in route_line.upper())
         if is_analytics:
             tables = compute_analytics_tables(state.bugs)
             render_inline_chart_and_table(q_norm, tables)
 
-        # Secondary boxes
         col_a, col_b = st.columns(2)
 
         with col_a:
             with st.container(border=True):
-                st.markdown("#### Top matches")
+                st.markdown("#### Evidence")
                 if top_matches:
                     st.code(top_matches, language="text")
                 else:
-                    st.caption("No top matches available for this query.")
+                    st.caption("No evidence available for this query.")
 
         with col_b:
             with st.container(border=True):
@@ -735,6 +752,11 @@ if run:
                 else:
                     st.caption("No extra details.")
 
-        # Raw output (optional, hidden)
         with st.expander("Raw output"):
             st.code(out if out else "(no output)", language="text")
+    
+    # Preview dataset (use parsed bugs; avoids CSV parsing issues)
+with st.expander("View demo dataset"):
+    df_preview = pd.DataFrame(state.bugs)
+    st.dataframe(df_preview, use_container_width=True)
+    st.caption(f"Rows: {len(df_preview)} | Columns: {', '.join(df_preview.columns)}")
