@@ -656,6 +656,8 @@ with open(csv_path, "rb") as f:
 # Header (product name, not “QA-RAG”)
 st.title("Bug Intelligence")
 st.caption("AI assistant for QA metrics and known issues")
+st.caption("Created by Ahmad Harrim")
+
 
 
 
