@@ -331,6 +331,11 @@ def set_question(q: str) -> None:
     st.session_state["question"] = q
 
 
+def clear_question() -> None:
+    # Important: do this via on_click callback (safe with widget key="question")
+    st.session_state["question"] = ""
+
+
 def extract_route(out: str) -> str | None:
     # Example: "[Router] Route = ANALYTICS"
     for ln in (out or "").splitlines():
@@ -658,9 +663,6 @@ st.title("Bug Intelligence")
 st.caption("AI assistant for QA metrics and known issues")
 st.caption("Created by Ahmad Harrim")
 
-
-
-
 # Minimal info row
 info1, info2, info3 = st.columns([1, 2, 2])
 with info1:
@@ -682,11 +684,8 @@ with row[0]:
 with row[1]:
     run = st.button("Ask", type="primary", use_container_width=True)
 with row[2]:
-    clear = st.button("Clear", use_container_width=True)
-
-if clear:
-    st.session_state["question"] = ""
-    st.rerun()
+    # FIX: clear via on_click callback (safe with widget key="question")
+    st.button("Clear", use_container_width=True, on_click=clear_question)
 
 # Output
 if run:
@@ -756,8 +755,8 @@ if run:
 
         with st.expander("Raw output"):
             st.code(out if out else "(no output)", language="text")
-    
-    # Preview dataset (use parsed bugs; avoids CSV parsing issues)
+
+# Preview dataset (use parsed bugs; avoids CSV parsing issues)
 with st.expander("View demo dataset"):
     df_preview = pd.DataFrame(state.bugs)
     st.dataframe(df_preview, use_container_width=True)
